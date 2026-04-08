@@ -1,20 +1,12 @@
 """
 FastAPI application — exposes the CreditCardEnv over HTTP.
 Compatible with Hugging Face Spaces (Docker SDK).
-
-Endpoints:
-    POST /reset         → { observation: ..., task: ... }
-    POST /step          → { observation, reward, done, info }
-    GET  /state         → current state dict
-    GET  /health        → { status: "ok", ... }
-    GET  /tasks         → list of available tasks
-    GET  /cards         → list of available credit cards
 """
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +15,6 @@ from pydantic import BaseModel
 from credit_card_env import CreditCardEnv, Action
 from credit_card_env.models import Observation, Reward, StepResult, UserProfile
 
-# ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -50,6 +41,16 @@ _ENV: Optional[CreditCardEnv] = None
 
 EXCEL_PATH = os.getenv("EXCEL_PATH", None)
 
+# Normalize short names → full task names
+TASK_ALIASES: Dict[str, str] = {
+    "easy": "easy",
+    "medium": "medium",
+    "hard": "hard",
+    "card_recommendation_easy": "easy",
+    "transaction_optimization_medium": "medium",
+    "portfolio_optimization_hard": "hard",
+}
+
 
 def get_env() -> CreditCardEnv:
     global _ENV
@@ -75,7 +76,7 @@ class StepRequest(BaseModel):
 class ResetResponse(BaseModel):
     observation: Dict[str, Any]
     task: str
-    available_cards: list
+    available_cards: List[str]
 
 
 class StepResponse(BaseModel):
@@ -97,20 +98,21 @@ def health() -> Dict[str, Any]:
         "environment_id": env.ENVIRONMENT_ID,
         "version": env.VERSION,
         "catalogue_size": len(env.catalogue),
-        "available_tasks": list(env.available_tasks.keys()),
+        "available_tasks": [
+            {"name": "easy",   "full_name": "card_recommendation_easy",        "difficulty": "easy"},
+            {"name": "medium", "full_name": "transaction_optimization_medium",  "difficulty": "medium"},
+            {"name": "hard",   "full_name": "portfolio_optimization_hard",      "difficulty": "hard"},
+        ],
     }
 
 
 @app.get("/tasks")
 def list_tasks() -> Dict[str, Any]:
-    env = get_env()
     return {
         "tasks": [
-            {
-                "name": name,
-                "difficulty": difficulty,
-            }
-            for name, difficulty in env.available_tasks.items()
+            {"name": "easy",   "full_name": "card_recommendation_easy",       "difficulty": "easy"},
+            {"name": "medium", "full_name": "transaction_optimization_medium", "difficulty": "medium"},
+            {"name": "hard",   "full_name": "portfolio_optimization_hard",     "difficulty": "hard"},
         ]
     }
 
@@ -134,25 +136,32 @@ def list_cards() -> Dict[str, Any]:
 
 
 @app.post("/reset", response_model=ResetResponse)
-@app.post("/reset/", response_model=ResetResponse)
 def reset(req: ResetRequest) -> ResetResponse:
     """Reset the environment for a specific task."""
     env = get_env()
+
+    # Normalize task name (accept both short and full names)
+    task_name = TASK_ALIASES.get(req.task_name)
+    if task_name is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown task '{req.task_name}'. Valid values: easy, medium, hard."
+        )
+
     try:
         user = UserProfile(**req.user) if req.user else None
-        obs = env.reset(task_name=req.task_name, user=user)
+        obs = env.reset(task_name=task_name, user=user)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     return ResetResponse(
         observation=obs.dict(),
-        task=req.task_name,
-        available_cards=env.available_cards,
+        task=task_name,
+        available_cards=env.available_cards,   # List[str] — card names only
     )
 
 
 @app.post("/step", response_model=StepResponse)
-@app.post("/step/", response_model=StepResponse)
 def step(req: StepRequest) -> StepResponse:
     """Take a step — provide a card recommendation."""
     env = get_env()
