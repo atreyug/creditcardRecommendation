@@ -1,15 +1,3 @@
-"""
-FastAPI application — exposes the CreditCardEnv over HTTP.
-Compatible with Hugging Face Spaces (Docker SDK).
-
-Endpoints:
-    POST /reset         → { observation: ..., task: ... }
-    POST /step          → { observation, reward, done, info }
-    GET  /state         → current state dict
-    GET  /health        → { status: "ok", ... }
-    GET  /tasks         → list of available tasks
-    GET  /cards         → list of available credit cards
-"""
 from __future__ import annotations
 
 import logging
@@ -21,21 +9,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from credit_card_env import CreditCardEnv, Action
-from credit_card_env.models import Observation, Reward, StepResult, UserProfile
+from credit_card_env.models import UserProfile
 
+# ---------------------------------------------------------------------------
+# Logging
 # ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# ---------------------------------------------------------------------------
+# App Initialization
+# ---------------------------------------------------------------------------
 app = FastAPI(
     title="Credit Card Recommendation OpenEnv API",
-    description=(
-        "Production-grade OpenEnv environment for AI-driven credit card recommendation. "
-        "Supports 3 difficulty tasks: Easy, Medium, Hard."
-    ),
+    description="OpenEnv environment for AI-driven credit card recommendation",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
 )
 
 app.add_middleware(
@@ -45,9 +33,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global singleton environment (per-process)
+# ---------------------------------------------------------------------------
+# Global Environment
+# ---------------------------------------------------------------------------
 _ENV: Optional[CreditCardEnv] = None
-
 EXCEL_PATH = os.getenv("EXCEL_PATH", None)
 
 
@@ -59,9 +48,8 @@ def get_env() -> CreditCardEnv:
 
 
 # ---------------------------------------------------------------------------
-# Request / Response schemas
+# Request Models
 # ---------------------------------------------------------------------------
-
 class ResetRequest(BaseModel):
     task_name: str = "easy"
     user: Optional[Dict[str, Any]] = None
@@ -72,116 +60,104 @@ class StepRequest(BaseModel):
     reasoning: str = ""
 
 
-class ResetResponse(BaseModel):
-    observation: Dict[str, Any]
-    task: str
-    available_cards: list
-
-
-class StepResponse(BaseModel):
-    observation: Dict[str, Any]
-    reward: Dict[str, Any]
-    done: bool
-    info: Dict[str, Any]
-
-
 # ---------------------------------------------------------------------------
-# Endpoints
+# Basic Routes
 # ---------------------------------------------------------------------------
+@app.get("/")
+def root():
+    return {"status": "running"}
+
 
 @app.get("/health")
-def health() -> Dict[str, Any]:
+def health():
     env = get_env()
     return {
         "status": "ok",
         "environment_id": env.ENVIRONMENT_ID,
         "version": env.VERSION,
-        "catalogue_size": len(env.catalogue),
-        "available_tasks": list(env.available_tasks.keys()),
     }
 
 
 @app.get("/tasks")
-def list_tasks() -> Dict[str, Any]:
+def tasks():
     env = get_env()
-    return {
-        "tasks": [
-            {
-                "name": name,
-                "difficulty": difficulty,
-            }
-            for name, difficulty in env.available_tasks.items()
-        ]
-    }
+    return {"tasks": list(env.available_tasks.keys())}
 
 
 @app.get("/cards")
-def list_cards() -> Dict[str, Any]:
+def cards():
     env = get_env()
-    return {
-        "count": len(env.catalogue),
-        "cards": [
-            {
-                "card_name": card.card_name,
-                "bank_name": card.bank_name,
-                "primary_category": card.primary_category,
-                "annual_fee": card.annual_fee,
-                "reward_rate": card.reward_rate,
-            }
-            for card in env.catalogue
-        ],
-    }
+    return {"cards": [card.card_name for card in env.catalogue]}
 
 
-@app.post("/reset", response_model=ResetResponse)
-def reset(req: ResetRequest) -> ResetResponse:
-    """Reset the environment for a specific task."""
+# ---------------------------------------------------------------------------
+# FIXED RESET ENDPOINT (IMPORTANT)
+# ---------------------------------------------------------------------------
+@app.post("/reset")
+def reset(req: Optional[ResetRequest] = None):
+    """
+    Works with or WITHOUT request body (OpenEnv requirement)
+    """
     env = get_env()
+
+    # Default request if none provided
+    if req is None:
+        req = ResetRequest()
+
     try:
         user = UserProfile(**req.user) if req.user else None
         obs = env.reset(task_name=req.task_name, user=user)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    return ResetResponse(
-        observation=obs.dict(),
-        task=req.task_name,
-        available_cards=env.available_cards,
+    return {
+        "observation": obs.dict(),
+        "task": req.task_name,
+        "available_cards": env.available_cards,
+    }
+
+
+# ---------------------------------------------------------------------------
+# STEP ENDPOINT
+# ---------------------------------------------------------------------------
+@app.post("/step")
+def step(req: StepRequest):
+    env = get_env()
+
+    if env._current_task is None:
+        raise HTTPException(status_code=400, detail="Call /reset first")
+
+    if env._done:
+        raise HTTPException(status_code=400, detail="Episode finished. Call /reset")
+
+    action = Action(
+        recommended_card=req.recommended_card,
+        reasoning=req.reasoning
     )
 
-
-@app.post("/step", response_model=StepResponse)
-def step(req: StepRequest) -> StepResponse:
-    """Take a step — provide a card recommendation."""
-    env = get_env()
-    if env._current_task is None:
-        raise HTTPException(status_code=400, detail="Call /reset before /step")
-    if env._done:
-        raise HTTPException(status_code=400, detail="Episode done. Call /reset to start a new episode.")
-
-    action = Action(recommended_card=req.recommended_card, reasoning=req.reasoning)
     try:
         next_obs, reward, done, info = env.step(action)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    return StepResponse(
-        observation=next_obs.dict(),
-        reward=reward.dict(),
-        done=done,
-        info=info,
-    )
+    return {
+        "observation": next_obs.dict(),
+        "reward": reward.dict(),
+        "done": done,
+        "info": info,
+    }
 
 
+# ---------------------------------------------------------------------------
+# STATE + GRADE
+# ---------------------------------------------------------------------------
 @app.get("/state")
-def state() -> Dict[str, Any]:
-    """Return the current environment state."""
+def state():
     env = get_env()
     return env.state()
 
 
 @app.get("/grade")
-def grade() -> Dict[str, float]:
-    """Return the deterministic grade for the current episode."""
+def grade():
     env = get_env()
     return {"grade": env.grade()}
