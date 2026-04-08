@@ -1,0 +1,190 @@
+environment_id: credit-card-recommendation-v1
+name: Credit Card Recommendation System
+version: "1.0.0"
+description: >
+  A production-grade OpenEnv environment for AI-driven credit card recommendation.
+  The agent learns to recommend credit cards, optimize transaction routing, and
+  plan long-term credit card portfolio strategy for Indian consumers.
+
+author: OpenEnv Community
+license: MIT
+
+# ---------------------------------------------------------------------------
+# Observation space
+# ---------------------------------------------------------------------------
+observation_space:
+  type: structured
+  fields:
+    user_profile:
+      type: object
+      description: "User's financial profile including income, credit score, spending habits, and owned cards"
+      fields:
+        user_id: { type: string }
+        name: { type: string }
+        annual_income: { type: float, unit: INR }
+        credit_score_tier: { type: enum, values: [poor, fair, good, very_good, excellent] }
+        owned_cards: { type: list[string] }
+        monthly_spending: { type: dict[string, float], description: "Category -> INR per month" }
+
+    available_cards:
+      type: list[CreditCard]
+      description: "Full catalogue of credit cards the agent may recommend"
+      card_fields:
+        card_name: { type: string }
+        bank_name: { type: string }
+        joining_fee: { type: float, unit: INR }
+        annual_fee: { type: float, unit: INR }
+        welcome_offer: { type: string }
+        primary_category: { type: enum, values: [dining, travel, groceries, fuel, online, entertainment, general] }
+        categories: { type: list[string] }
+        benefits: { type: list[string] }
+        reward_rate: { type: float, description: "Percentage reward/cashback rate" }
+
+    current_transaction:
+      type: object
+      nullable: true
+      description: "Present only in MEDIUM and HARD tasks"
+      fields:
+        merchant: { type: string }
+        amount: { type: float, unit: INR }
+        category: { type: enum, values: [dining, travel, groceries, fuel, online, entertainment, general] }
+
+    step_number: { type: int }
+    max_steps: { type: int }
+    task_name: { type: string }
+    task_difficulty: { type: enum, values: [easy, medium, hard] }
+    context: { type: dict, description: "Task-specific additional context and instructions" }
+
+# ---------------------------------------------------------------------------
+# Action space
+# ---------------------------------------------------------------------------
+action_space:
+  type: structured
+  fields:
+    recommended_card:
+      type: string
+      description: "Exact card_name from the available_cards catalogue"
+    reasoning:
+      type: string
+      nullable: true
+      description: "Optional natural-language explanation of the recommendation"
+
+# ---------------------------------------------------------------------------
+# Reward
+# ---------------------------------------------------------------------------
+reward:
+  type: float
+  range: [0.0, 1.0]
+  description: "Scalar reward in [0.0, 1.0] reflecting recommendation quality"
+  components:
+    category_match:
+      weight: 0.30
+      description: "Alignment between card's primary category and user's/transaction's target category"
+    reward_rate:
+      weight: 0.30
+      description: "Effective reward/cashback rate for the target category, normalized to [0, 1]"
+    fee_efficiency:
+      weight: 0.15
+      description: "Ratio of annual benefit value to annual fee"
+    novelty_bonus:
+      weight: 0.15
+      description: "Bonus for recommending a card the user doesn't already own"
+    welcome_offer_bonus:
+      weight: 0.10
+      description: "Bonus for attractive welcome offer on a new card"
+    redundancy_penalty:
+      value: -0.25
+      description: "Penalty for recommending an already-owned card when a new one is requested"
+    eligibility_penalty:
+      value: -0.40
+      description: "Penalty for recommending a card the user doesn't qualify for"
+
+# ---------------------------------------------------------------------------
+# Tasks
+# ---------------------------------------------------------------------------
+tasks:
+  - name: card_recommendation_easy
+    difficulty: easy
+    description: >
+      Recommend the best new credit card for a user based on their spending habits,
+      credit score tier, and income. The card must not already be owned by the user.
+    max_steps: 1
+    grader: deterministic
+    grader_description: >
+      Computes reward based on category match, reward rate, fee efficiency,
+      novelty bonus, and welcome offer. Returns a score in [0.0, 1.0].
+
+  - name: transaction_optimization_medium
+    difficulty: medium
+    description: >
+      Given a specific purchase transaction, recommend the best card from the user's
+      existing portfolio to maximize cashback or reward points.
+      The agent MUST recommend an owned card.
+    max_steps: 1
+    grader: deterministic
+    grader_description: >
+      Scores the recommendation based on transaction category match and relative
+      reward rate (chosen_rate / best_possible_rate among owned cards).
+
+  - name: portfolio_optimization_hard
+    difficulty: hard
+    description: >
+      Phase 1: Recommend a new credit card to strategically expand the user's portfolio.
+      Phase 2: Route 5 consecutive transactions to the best available card,
+      including the newly added card.
+    max_steps: 6
+    grader: deterministic
+    grader_description: >
+      Weighted grader: Phase 1 contributes 30%, Phase 2 contributes 70%
+      (14% per transaction across 5 transactions).
+
+# ---------------------------------------------------------------------------
+# Environment metadata
+# ---------------------------------------------------------------------------
+environment:
+  domain: finance
+  region: India
+  currency: INR
+  card_catalogue_size: 15  # synthetic default; grows with Excel input
+  episode_termination: max_steps_reached
+  deterministic: true
+
+# ---------------------------------------------------------------------------
+# API (when served via FastAPI)
+# ---------------------------------------------------------------------------
+api:
+  endpoints:
+    - path: /reset
+      method: POST
+      description: Reset the environment for a given task
+    - path: /step
+      method: POST
+      description: Submit an action and receive the next observation + reward
+    - path: /state
+      method: GET
+      description: Get the current environment state
+    - path: /grade
+      method: GET
+      description: Get the deterministic grade for the current episode
+    - path: /health
+      method: GET
+      description: Health check and metadata
+    - path: /tasks
+      method: GET
+      description: List all available tasks
+    - path: /cards
+      method: GET
+      description: List all available credit cards
+
+# ---------------------------------------------------------------------------
+# Docker / Deployment
+# ---------------------------------------------------------------------------
+deployment:
+  docker:
+    base_image: python:3.11-slim
+    port: 7860
+    command: "uvicorn app:app --host 0.0.0.0 --port 7860"
+  huggingface_spaces:
+    sdk: docker
+    port: 7860
+    compatible: true

@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: credit-card-env
+Version: 1.0.0
+Summary: Credit Card Recommendation System — OpenEnv Environment
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.10
+Requires-Dist: pydantic<3.0.0,>=2.0.0
+Requires-Dist: fastapi>=0.111.0
+Requires-Dist: uvicorn[standard]>=0.29.0
+Requires-Dist: openai>=1.30.0
+Requires-Dist: pandas>=2.1.0
+Requires-Dist: openpyxl>=3.1.0
+Requires-Dist: pyyaml>=6.0.1
+Dynamic: classifier
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
